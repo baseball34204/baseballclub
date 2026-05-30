@@ -98,6 +98,12 @@ let SYNC_USER = localStorage.getItem("bb_sync_user") || "メンバー";
 let _syncTimer = null;
 let _syncStatus = "local"; // "local" | "syncing" | "ok" | "error"
 let _lastSynced = null;
+// この端末が最後に「取り込んだ／アップロード成功した」クラウド側のupdatedAt(ミリ秒)。
+// これがサーバ基準の唯一の真実。ローカル時刻(Date.now())とは比較しない。
+let _remoteTs = parseInt(localStorage.getItem("bb_remote_ts")||"0") || 0;
+// この端末でローカル変更を加えたが、まだクラウドへアップ成功していない場合true。
+// trueの間はクラウドで上書きせず、自分の変更を先にアップする。
+let _dirty = false;
 
 function loadS(){
   // localStorageはキャッシュとして使うのみ。起動時はGASから取得を優先
@@ -137,6 +143,7 @@ function saveS(){
     localStorage.setItem("bb_v3",JSON.stringify(S));
     localStorage.setItem("bb_v3_ts",String(Date.now()));
   }catch(e){}
+  _dirty = true; // ローカルに未送信の変更がある
   if(GAS_URL){ _scheduleSync(); }
   _updateSyncBadge();
 }
@@ -158,7 +165,7 @@ function _syncToCloud(){
   for(let i=0;i<total;i++) chunks.push(json.slice(i*CHUNK,(i+1)*CHUNK));
   const user=encodeURIComponent(SYNC_USER);
 
-  // チャンクを順番に送信する再帰関数
+  // チャンクを順番に送信する再帰関数（レスポンスJSON全体を返す）
   function sendChunk(idx){
     return new Promise((resolve)=>{
       const cbName="__bb_chunk_"+Date.now()+"_"+idx;
@@ -168,17 +175,17 @@ function _syncToCloud(){
       window[cbName]=(json)=>{
         cleanup();
         console.log("[BB Sync] chunk "+idx+"/"+total+" response:", json);
-        resolve(json&&json.ok);
+        resolve(json&&json.ok?json:null);
       };
       script.onerror=()=>{
         if(done)return; cleanup();
         console.warn("[BB Sync] chunk "+idx+" script error");
-        resolve(false);
+        resolve(null);
       };
       setTimeout(()=>{
         if(done)return; cleanup();
         console.warn("[BB Sync] chunk "+idx+" timeout");
-        resolve(false);
+        resolve(null);
       },30000);
       const data=encodeURIComponent(chunks[idx]);
       script.src=GAS_URL+"?action=chunk&callback="+cbName+"&idx="+idx+"&total="+total+"&updatedBy="+user+"&data="+data;
@@ -186,25 +193,32 @@ function _syncToCloud(){
     });
   }
 
-  // 全チャンクを順番に送信
-  let p=Promise.resolve(true);
+  // 全チャンクを順番に送信（最後のレスポンスのupdatedAtを採用）
+  let p=Promise.resolve({ok:true});
   for(let i=0;i<total;i++){
     const idx=i;
-    p=p.then(ok=>{
-      if(!ok) return false;
+    p=p.then(prev=>{
+      if(!prev) return null;
       return sendChunk(idx);
     });
   }
-  return p.then(ok=>{
-    if(ok){ _syncStatus="ok"; _lastSynced=new Date(); console.log("[BB Sync] 全チャンク送信完了"); }
+  return p.then(last=>{
+    if(last&&last.ok){
+      _syncStatus="ok"; _lastSynced=new Date();
+      // アップ成功：サーバが返したupdatedAtを取り込み済み時刻として記録し、dirtyを解除
+      const ut=last.updatedAt?new Date(last.updatedAt).getTime():Date.now();
+      _remoteTs=ut; localStorage.setItem("bb_remote_ts",String(ut));
+      _dirty=false;
+      console.log("[BB Sync] 全チャンク送信完了 remoteTs="+ut);
+    }
     else { _syncStatus="error"; console.warn("[BB Sync] チャンク送信失敗"); }
     _updateSyncBadge();
   });
 }
 
-async function loadFromCloud(){
-  if(!GAS_URL){ alert("GAS URLが設定されていません"); return; }
-  _syncStatus="syncing"; _updateSyncBadge();
+async function loadFromCloud(silent){
+  if(!GAS_URL){ if(!silent) alert("GAS URLが設定されていません"); return; }
+  if(!silent){ _syncStatus="syncing"; _updateSyncBadge(); }
   return new Promise((resolve)=>{
     // fetchはGASのリダイレクトでCORSエラーになるためJSONPで取得
     const cbName="__bb_cb_"+Date.now();
@@ -223,54 +237,79 @@ async function loadFromCloud(){
           if(remote&&typeof remote==="object"&&Array.isArray(remote.members)){
             const localHasData=S.members.length>0||S.games.length>0;
             const remoteEmpty=remote.members.length===0&&(remote.games||[]).length===0;
-            console.log("[BB Sync] members:"+remote.members.length+" localHasData:"+localHasData+" remoteEmpty:"+remoteEmpty);
-            if(!remoteEmpty){
-              // タイムスタンプ比較：ローカルの方が新しければローカルを守る
-              const remoteTime=json.updatedAt?new Date(json.updatedAt).getTime():0;
-              const localTime=_lastSynced?_lastSynced.getTime():0;
-              const localStoredTime=parseInt(localStorage.getItem("bb_v3_ts")||"0");
-              const localNewest=Math.max(localTime,localStoredTime);
-              if(localNewest>remoteTime&&localHasData){
-                // ローカルの方が新しい→ローカルを使いGASにアップロード
-                console.log("[BB Sync] ローカルが新しいためアップロード優先");
-                _syncStatus="ok"; _updateSyncBadge();
-                _scheduleSync();
-                resolve(); return;
+            const remoteTime=json.updatedAt?new Date(json.updatedAt).getTime():0;
+            console.log("[BB Sync] members:"+remote.members.length+" localHasData:"+localHasData+" remoteEmpty:"+remoteEmpty+" remoteTs="+remoteTime+" myRemoteTs="+_remoteTs+" dirty="+_dirty);
+
+            // ── クラウドが完全に空のとき ──
+            if(remoteEmpty){
+              // ローカルにデータがあれば自分のを残してアップ（初回セットアップ等）
+              if(localHasData){
+                _syncStatus="ok"; _updateSyncBadge(); _scheduleSync(); resolve(); return;
               }
-              // GASの方が新しい or 同じ→GASデータを採用
+              _syncStatus="ok"; _updateSyncBadge(); resolve(); return;
+            }
+
+            // ── 判定はサーバのupdatedAtのみを基準にする ──
+            // remoteTime > _remoteTs : 他端末がこの端末の取り込み後に更新した → 取り込むべき
+            const remoteIsNewer = remoteTime > _remoteTs;
+
+            if(remoteIsNewer){
+              if(_dirty){
+                // この端末に未送信の変更があり、かつクラウドも新しい＝衝突。
+                // データ消失を防ぐため、自分の変更を上書きせず先にアップロードして警告。
+                console.warn("[BB Sync] 衝突検出：ローカル未送信変更ありかつクラウドも新しい→ローカル優先でアップ");
+                _syncStatus="ok"; _updateSyncBadge(); _scheduleSync(); resolve(); return;
+              }
+              // 未送信変更なし→クラウドの新しいデータを採用
               S=remote;
               localStorage.setItem("bb_v3",JSON.stringify(S));
-              localStorage.setItem("bb_v3_ts",String(remoteTime||Date.now()));
+              localStorage.setItem("bb_v3_ts",String(Date.now()));
+              _remoteTs=remoteTime; localStorage.setItem("bb_remote_ts",String(remoteTime));
+              _dirty=false;
               _syncStatus="ok"; _lastSynced=new Date(); _updateSyncBadge();
-              fixMemberIds(); // GAS取得後にmemberIdを補完
+              fixMemberIds();
               render(); resolve(); return;
             }
-            // GASが空でローカルにデータがあればローカルを使いGASにアップ
-            if(localHasData){
-              _syncStatus="ok"; _updateSyncBadge();
-              _scheduleSync();
-              resolve(); return;
+
+            // ── クラウドが新しくない（取り込み済み or 同じ） ──
+            // 初めてこの端末で開いた等で _remoteTs が0なら、クラウドを基準として取り込む
+            if(_remoteTs===0 && !_dirty){
+              S=remote;
+              localStorage.setItem("bb_v3",JSON.stringify(S));
+              localStorage.setItem("bb_v3_ts",String(Date.now()));
+              _remoteTs=remoteTime; localStorage.setItem("bb_remote_ts",String(remoteTime));
+              _syncStatus="ok"; _lastSynced=new Date(); _updateSyncBadge();
+              fixMemberIds();
+              render(); resolve(); return;
             }
+            // 取り込み済みで未送信変更があるならアップ、なければそのまま
+            if(_dirty){ _scheduleSync(); }
+            _syncStatus="ok"; _updateSyncBadge(); resolve(); return;
           }
         } else {
           console.warn("[BB Sync] not ok or no data");
         }
         _syncStatus="ok"; _updateSyncBadge();
-      }catch(e){ console.error("[BB Sync] parse error:",String(e)); _syncStatus="error"; _updateSyncBadge(); }
+      }catch(e){
+        console.error("[BB Sync] parse error:",String(e));
+        if(!silent){ _syncStatus="error"; _updateSyncBadge(); }
+      }
       resolve();
     };
     script.onerror=()=>{
       if(done) return;
       cleanup();
-      console.warn("loadFromCloud JSONP error");
-      _syncStatus="error"; _updateSyncBadge(); render(); resolve();
+      console.warn("loadFromCloud JSONP error"+(silent?" (silent)":""));
+      if(!silent){ _syncStatus="error"; _updateSyncBadge(); render(); }
+      resolve();
     };
     setTimeout(()=>{
       if(done) return;
       cleanup();
-      console.warn("loadFromCloud timeout");
-      _syncStatus="error"; _updateSyncBadge(); render(); resolve();
-    },10000);
+      console.warn("loadFromCloud timeout"+(silent?" (silent)":""));
+      if(!silent){ _syncStatus="error"; _updateSyncBadge(); render(); }
+      resolve();
+    },20000);
     script.src=GAS_URL+"?callback="+cbName+"&t="+Date.now();
     document.head.appendChild(script);
   });
@@ -475,6 +514,8 @@ function buildLayout(){
         <div id="dbg-games">ローカル試合数: <b style="color:#e8c070">-</b></div>
         <div id="dbg-status-row">同期状態: <b style="color:#e8c070">-</b></div>
         <div id="dbg-lastsync-row">最終同期: <b style="color:#e8c070">-</b></div>
+        <div id="dbg-remotets-row">取込済クラウド時刻: <b style="color:#e8c070">-</b></div>
+        <div id="dbg-dirty-row">未送信の変更: <b style="color:#e8c070">-</b></div>
         <div id="dbg-url-row" style="margin-top:6px;word-break:break-all">GAS URL:<br><span id="dbg-url-val" style="color:#60d060">-</span></div>
         <div style="margin-top:6px"><button onclick="testSyncDebug()" style="background:#2a3a50;color:#e8c070;border:1px solid #3a5068;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">🧪 GAS疎通テスト</button></div>
         <div id="dbg-result" style="margin-top:6px;color:#e8c070"></div>
@@ -1292,6 +1333,8 @@ function openSyncModal(){
     const dg=el("dbg-games");        if(dg) dg.innerHTML='ローカル試合数: <b style="color:#e8c070">'+S.games.length+'</b>';
     const ds=el("dbg-status-row");   if(ds) ds.innerHTML='同期状態: <b style="color:#e8c070">'+_syncStatus+'</b>';
     const dl=el("dbg-lastsync-row"); if(dl) dl.innerHTML='最終同期: <b style="color:#e8c070">'+(_lastSynced?_lastSynced.toLocaleTimeString("ja-JP"):"未同期")+'</b>';
+    const dr=el("dbg-remotets-row"); if(dr) dr.innerHTML='取込済クラウド時刻: <b style="color:#e8c070">'+(_remoteTs?new Date(_remoteTs).toLocaleTimeString("ja-JP"):"なし")+'</b>';
+    const dd=el("dbg-dirty-row");    if(dd) dd.innerHTML='未送信の変更: <b style="color:#e8c070">'+(_dirty?"あり":"なし")+'</b>';
     const du=el("dbg-url-val");      if(du) du.textContent=GAS_URL||"未設定";
   },50);
 }
@@ -1305,11 +1348,14 @@ function saveSyncSettings(){
   el("sync-modal").style.display="none";
   if(GAS_URL){
     _syncStatus="syncing"; _updateSyncBadge();
+    // クラウドから取得を試みる。errorにならなければ接続は成功とみなす
+    // （取得できた / 取り込み済み / これからアップ予定 のいずれも成功扱い）
     loadFromCloud().then(()=>{
-      if(_syncStatus!=="ok"){ return _syncToCloud(); }
-    }).then(()=>{
+      const failed = (_syncStatus==="error");
       _updateSyncBadge();
-      alert(_syncStatus==="ok"?"✅ クラウド同期が有効になりました！\nこのURLを全員に共有してください。":"⚠️ 同期できませんでした。URLを確認してください。");
+      alert(!failed
+        ?"✅ クラウド同期が有効になりました！\nこのURLを全員に共有してください。"
+        :"⚠️ 同期できませんでした。URLを確認してください。");
       render();
     });
   } else {
@@ -1322,6 +1368,8 @@ function clearGasUrl(){
   GAS_URL=""; SYNC_USER="ユーザー";
   localStorage.removeItem("bb_gas_url");
   localStorage.removeItem("bb_sync_user");
+  localStorage.removeItem("bb_remote_ts");
+  _remoteTs=0; _dirty=false;
   _syncStatus="local"; el("sync-modal").style.display="none"; render();
 }
 
@@ -2243,6 +2291,29 @@ fixMemberIds(); // 打席のmemberIdを補完
 render();
 // GAS設定済みならJSONP経由でクラウドから取得して再描画
 if(GAS_URL){ loadFromCloud(); }
+
+// ── 自動同期：他端末の更新を定期的に取り込む ──────────────
+// 45〜75秒のランダム間隔でクラウドを確認（2台同時叩きを回避）。
+// silentモード: 失敗してもerrorバッジにせず静かにリトライする。
+function _startPoll(){
+  const delay = 45000 + Math.floor(Math.random()*30000);
+  _pollTimer = setTimeout(()=>{
+    if(GAS_URL && !_dirty && _syncStatus!=="syncing"){
+      loadFromCloud(true).then(()=>_startPoll());
+    } else {
+      _startPoll();
+    }
+  }, delay);
+}
+let _pollTimer=null;
+_startPoll();
+
+// 画面に戻ってきたとき（タブ復帰・スマホ復帰）に即チェック（silentモード）
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible" && GAS_URL && !_dirty && _syncStatus!=="syncing"){
+    loadFromCloud(true);
+  }
+});
 
 </script>
 </body>
