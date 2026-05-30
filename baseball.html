@@ -1271,7 +1271,10 @@ function renderStats(){
   const ss=V.statSort||"hits";
   const wins=S.games.filter(g=>(g.myScore!=null&&g.oppScore!=null&&g.myScore>g.oppScore)||g.type==="不戦勝").length;
   const losses=S.games.filter(g=>(g.myScore!=null&&g.oppScore!=null&&g.myScore<g.oppScore)||g.type==="不戦敗").length;
-  const batters=S.members.filter(m=>m.position!=="控え"||ps[m.id].ab>0||ps[m.id].bb>0||ps[m.id].games>0).sort((a,b)=>(ps[b.id][ss]||0)-(ps[a.id][ss]||0));
+  const batters=S.members.filter(m=>m.position!=="控え"||ps[m.id].ab>0||ps[m.id].bb>0||ps[m.id].games>0).sort((a,b)=>{
+    if(ss==="avg"){const aa=ps[a.id].ab>0?ps[a.id].hits/ps[a.id].ab:-1;const bb2=ps[b.id].ab>0?ps[b.id].hits/ps[b.id].ab:-1;return bb2-aa;}
+    return (ps[b.id][ss]||0)-(ps[a.id][ss]||0);
+  });
   return `
 <div class="card" style="margin-bottom:16px;display:flex;gap:24px;align-items:center;flex-wrap:wrap">
   <div style="font-family:'Bebas Neue';font-size:12px;color:var(--mut);letter-spacing:2px">通算成績</div>
@@ -1280,7 +1283,7 @@ function renderStats(){
 </div>
 <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
   <span style="font-size:11px;color:var(--mut);align-self:center">並び替え:</span>
-  ${[["hits","安打"],["hr","本塁打"],["rbi","打点"],["bb","四死球"],["k","三振"]].map(([k,l])=>`<button class="pill ${ss===k?"on":""}" onclick="V.statSort='${k}';renderScreen()">${l}順</button>`).join("")}
+  ${[["avg","打率"],["hits","安打"],["hr","本塁打"],["rbi","打点"],["bb","四死球"],["k","三振"]].map(([k,l])=>`<button class="pill ${ss===k?"on":""}" onclick="V.statSort='${k}';renderScreen()">${l}順</button>`).join("")}
 </div>
 <div class="card" style="overflow-x:auto">
   <table style="min-width:560px">
@@ -1636,34 +1639,21 @@ function recordResult(gid,code,skipPitch){
   // ── 3B
   if(code==="3B"){scored=b.filter(x=>x).length;lv.bases=[false,false,true];if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}nextBatter(lv,g);return;}
 
-  // ── 2B: always show dialog
+  // ── 2B: 全走者2塁分進塁（2塁・3塁走者は得点）。ランナーパネルで調整可
   if(code==="2B"){
-    const opts=[];
     const[b1,b2,b3]=b;
-    if(!b1&&!b2&&!b3){lv.bases=[false,true,false];nextBatter(lv,g);return;}
-    if(b3&&b2&&b1){opts.push({l:"全走者ホームイン(3点)、打者2塁",bases:[false,true,false],sc:3});opts.push({l:"2塁・3塁ホームイン(2点)、1塁→3塁、打者2塁",bases:[false,true,true],sc:2});opts.push({l:"3塁ホームイン(1点)、2塁→3塁、1塁→2塁、打者2塁",bases:[false,true,false],sc:1});}
-    else if(b2&&b3){opts.push({l:"3塁・2塁走者ホームイン(2点)、打者2塁",bases:[false,true,false],sc:2});opts.push({l:"3塁ホームイン(1点)、2塁→3塁、打者2塁",bases:[false,true,true],sc:1});opts.push({l:"【特殊】全走者ストップ（2・3塁のまま）",bases:[false,true,true],sc:0});}
-    else if(b1&&b3){opts.push({l:"3塁ホームイン(1点)、1塁→3塁、打者2塁",bases:[false,true,true],sc:1});opts.push({l:"3塁・1塁ホームイン(2点)、打者2塁",bases:[false,true,false],sc:2});}
-    else if(b1&&b2){opts.push({l:"2塁ホームイン(1点)、1塁→3塁、打者2塁",bases:[false,true,true],sc:1});opts.push({l:"2塁・1塁ホームイン(2点)、打者2塁",bases:[false,true,false],sc:2});}
-    else if(b3){opts.push({l:"3塁ホームイン(1点)、打者2塁",bases:[false,true,false],sc:1});opts.push({l:"3塁走者ストップ（2・3塁）",bases:[false,true,true],sc:0});}
-    else if(b2){opts.push({l:"2塁ホームイン(1点)、打者2塁",bases:[false,true,false],sc:1});opts.push({l:"2塁→3塁ストップ（2・3塁）",bases:[false,true,true],sc:0});}
-    else if(b1){opts.push({l:"1塁→3塁、打者2塁",bases:[false,true,true]});opts.push({l:"1塁ホームイン(1点)、打者2塁",bases:[false,true,false],sc:1});}
-    showAdv("二塁打：走者の進塁先を選んでください",opts,g,lv.inning);nextBatter(lv,g);return;
+    scored=(b3?1:0)+(b2?1:0);
+    if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
+    lv.bases=[false,true,b1]; // 打者2塁、1塁走者→3塁
+    nextBatter(lv,g);return;
   }
 
-  // ── 1B
+  // ── 1B: 全走者1塁分進塁（3塁走者は得点）。ランナーパネルで調整可
   if(code==="1B"){
     const[b1,b2,b3]=b;
-    if(!b1&&!b2&&!b3){lv.bases=[true,false,false];nextBatter(lv,g);return;}
     scored=b3?1:0;if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
-    const opts=[];
-    if(b1&&b2){opts.push({l:"1塁→2塁、2塁→3塁、打者1塁",bases:[true,true,true]});opts.push({l:"1塁→2塁、2塁ホームイン(1点)、打者1塁",bases:[true,false,true],sc:1});opts.push({l:"1塁→3塁、2塁ホームイン(1点)、打者1塁",bases:[true,false,false],sc:1});}
-    else if(b1){opts.push({l:"1塁→2塁、打者1塁",bases:[true,true,b3?false:false]});opts.push({l:"1塁→3塁、打者1塁",bases:[true,false,true]});}
-    else if(b2){opts.push({l:"2塁→3塁、打者1塁",bases:[true,false,true]});opts.push({l:"2塁ホームイン(1点)、打者1塁",bases:[true,false,false],sc:1});}
-    else{lv.bases=[true,false,false];nextBatter(lv,g);return;}
-    if(scored){// 得点は事前加算済み、追加得点のみ
-      opts.forEach(o=>{if(o.sc){}});}
-    showAdv("単打：走者の進塁先を選んでください",opts,g,lv.inning);nextBatter(lv,g);return;
+    lv.bases=[true,b1,b2]; // 打者1塁、1塁→2塁、2塁→3塁
+    nextBatter(lv,g);return;
   }
 
   // ── KW（振り逃げ）: アウトにならず打者1塁
@@ -1676,28 +1666,19 @@ function recordResult(gid,code,skipPitch){
     nextBatter(lv,g);return;
   }
 
-  // ── IF（内野安打）: 1Bと同じ処理
+  // ── IF（内野安打）: 1Bと同じ自動進塁
   if(code==="IF"){
     const[b1,b2,b3]=b;
-    if(!b1&&!b2&&!b3){lv.bases=[true,false,false];nextBatter(lv,g);return;}
     scored=b3?1:0;if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
-    const opts=[];
-    if(b1&&b2){opts.push({l:"1塁→2塁、2塁→3塁、打者1塁",bases:[true,true,true]});opts.push({l:"2塁ホームイン(1点)、1塁→3塁、打者1塁",bases:[true,false,true],sc:1});}
-    else if(b1){opts.push({l:"1塁→2塁、打者1塁",bases:[true,true,false]});opts.push({l:"1塁→3塁、打者1塁",bases:[true,false,true]});}
-    else if(b2){opts.push({l:"2塁→3塁、打者1塁",bases:[true,false,true]});opts.push({l:"2塁ホームイン(1点)、打者1塁",bases:[true,false,false],sc:1});}
-    else{lv.bases=[true,false,false];nextBatter(lv,g);return;}
-    showAdv("内野安打：走者の進塁先を選んでください",opts,g,lv.inning);nextBatter(lv,g);return;
+    lv.bases=[true,b1,b2];
+    nextBatter(lv,g);return;
   }
 
-  // ── OBS（走塁妨害）: 審判判定に応じて走者を進める
+  // ── OBS（走塁妨害）: 打者1塁、全走者1塁進塁
   if(code==="OBS"){
     const[b1,b2,b3]=b;
-    const opts=[];
-    opts.push({l:"打者を1塁へ（走塁妨害）",bases:[true,b1||false,b2||false]});
-    if(b1) opts.push({l:"1塁走者を2塁へ（走塁妨害）",bases:[b1,true,b3]});
-    if(b2) opts.push({l:"2塁走者を3塁へ（走塁妨害）",bases:[b1,b2,true]});
-    if(b3) opts.push({l:"3塁走者ホームイン(1点)",bases:[b1,b2,false],sc:1});
-    showAdv("走塁妨害(OBS)：審判の判定を選んでください",opts,g,lv.inning);
+    scored=b3?1:0;if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
+    lv.bases=[true,b1,b2];
     nextBatter(lv,g);return;
   }
 
@@ -1723,120 +1704,71 @@ function recordResult(gid,code,skipPitch){
     m2.style.display="flex";return;
   }
 
-  // ── E/FC: 走者がいる場合は進塁先を選択できるようにする
+  // ── E/FC: 打者1塁、全走者1塁進塁。ランナーパネルで調整可
   if(["E","FC"].includes(code)){
     const[b1,b2,b3]=b;
-    const label=code==="E"?"エラー":"野選(FC)";
-    // 走者なし：打者1塁 or 打者2塁（悪送球テイクワンベース）
-    if(!b1&&!b2&&!b3){
-      const noRunOpts=[{l:"打者1塁（通常エラー）",bases:[true,false,false]},{l:"打者2塁（悪送球・テイクワンベース）",bases:[false,true,false]}];
-      showAdv(label+"：打者の進塁先を選んでください",noRunOpts,g,lv.inning);
-      nextBatter(lv,g);return;
-    }
-    // 走者あり：進塁オプションを提示
-    const opts=[];
-    if(b3&&b2&&b1){
-      opts.push({l:"全走者そのまま、打者1塁（満塁）",bases:[true,true,true]});
-      opts.push({l:"3塁走者ホームイン(1点)、2塁→3塁、1塁→2塁、打者1塁",bases:[true,true,false],sc:1});
-      opts.push({l:"全走者1つ進塁＋打者1塁（エラー）3塁走者ホームイン(1点)",bases:[true,true,false],sc:1});
-    } else if(b2&&b3){
-      opts.push({l:"走者そのまま、打者1塁（満塁）",bases:[true,true,true]});
-      opts.push({l:"3塁ホームイン(1点)、2塁→3塁、打者1塁",bases:[true,false,true],sc:1});
-      opts.push({l:"3塁・2塁ホームイン(2点)、打者1塁",bases:[true,false,false],sc:2});
-    } else if(b1&&b3){
-      opts.push({l:"走者そのまま、打者1塁（満塁）",bases:[true,true,true]});
-      opts.push({l:"3塁ホームイン(1点)、1塁→2塁、打者1塁",bases:[true,true,false],sc:1});
-    } else if(b1&&b2){
-      opts.push({l:"走者そのまま、打者1塁（満塁）",bases:[true,true,true]});
-      opts.push({l:"2塁→3塁、1塁→2塁、打者1塁",bases:[true,true,false]});
-      opts.push({l:"2塁ホームイン(1点)、1塁→3塁、打者1塁",bases:[true,false,true],sc:1});
-    } else if(b3){
-      opts.push({l:"3塁走者そのまま、打者1塁",bases:[true,false,true]});
-      opts.push({l:"3塁ホームイン(1点)、打者1塁",bases:[true,false,false],sc:1});
-    } else if(b2){
-      opts.push({l:"2塁走者そのまま、打者1塁",bases:[true,true,false]});
-      opts.push({l:"2塁→3塁、打者1塁",bases:[true,false,true]});
-      opts.push({l:"2塁ホームイン(1点)、打者1塁",bases:[true,false,false],sc:1});
-    } else if(b1){
-      opts.push({l:"1塁走者そのまま（打者アウトで1塁へ）",bases:[true,true,false]});
-      opts.push({l:"1塁→2塁、打者1塁",bases:[true,true,false]});
-      opts.push({l:"1塁→3塁、打者1塁",bases:[true,false,true]});
-    }
-    if(opts.length===0){lv.bases=[true,b1||false,b2||false];nextBatter(lv,g);return;}
-    showAdv(label+"：走者の動きを選んでください",opts,g,lv.inning);
+    scored=b3?1:0;if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
+    lv.bases=[true,b1,b2];
     nextBatter(lv,g);return;
   }
 
   // ── K/Kc
   if(["K","Kc"].includes(code)){lv.outs=Math.min(3,lv.outs+1);nextBatter(lv,g);return;}
 
-  // ── GO
+  // ── GO: 打者アウト、走者は1塁ずつ進塁（3塁走者は得点）。ランナーパネルで調整可
   if(code==="GO"){
     lv.outs=Math.min(3,lv.outs+1);
-    // 3アウト目はランナーの動きを聞かない（イニング終了）
     if(lv.outs>=3){nextBatter(lv,g);return;}
     if(!b[0]&&!b[1]&&!b[2]){nextBatter(lv,g);return;}
-    const[b1,b2,b3]=b,opts=[];
-    if(b3&&!b1&&!b2){opts.push({l:"3塁走者ストップ、打者アウト",bases:[false,false,true]});opts.push({l:"3塁走者ホームイン(1点)、打者アウト",bases:[false,false,false],sc:1});}
-    else if(b1&&!b2&&!b3){opts.push({l:"1塁走者→2塁（打者アウト）",bases:[false,true,false]});opts.push({l:"1塁走者ストップ（打者アウト）",bases:[true,false,false]});}
-    else if(!b1&&b2&&!b3){opts.push({l:"2塁走者→3塁",bases:[false,false,true]});opts.push({l:"2塁走者ストップ",bases:[false,true,false]});}
-    else if(b1&&b2&&!b3){opts.push({l:"フォースアウト：1塁走者アウト、2塁→3塁、打者1塁",bases:[true,false,true]});opts.push({l:"1塁→2塁、2塁→3塁（打者アウト）",bases:[false,true,true]});}
-    else if(b1&&!b2&&b3){opts.push({l:"1塁→2塁、3塁ストップ（打者アウト）",bases:[false,true,true]});opts.push({l:"3塁ホームイン(1点)、1塁→2塁（打者アウト）",bases:[false,true,false],sc:1});}
-    else if(!b1&&b2&&b3){opts.push({l:"走者そのまま（打者アウト）",bases:[false,true,true]});opts.push({l:"3塁ホームイン(1点)、2塁走者ストップ（打者アウト）",bases:[false,true,false],sc:1});}
-    else if(b1&&b2&&b3){opts.push({l:"フォースアウト：打者1塁、全走者1つ進塁",bases:[true,true,true]});opts.push({l:"フォースアウト：3塁走者ホームイン(1点)、打者1塁",bases:[true,true,false],sc:1});}
-    if(opts.length===0){nextBatter(lv,g);return;}
-    showAdv("ゴロアウト：走者の動きを選んでください",opts,g,lv.inning);nextBatter(lv,g);return;
+    const[b1,b2,b3]=b;
+    scored=b3?1:0;if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
+    lv.bases=[false,b1,b2]; // 打者アウト、走者は1塁ずつ前進
+    nextBatter(lv,g);return;
   }
 
-  // ── FO (タッチアップ)
+  // ── FO: 打者アウト。3塁走者はタッチアップで得点、他はそのまま。ランナーパネルで調整可
   if(code==="FO"){
     lv.outs=Math.min(3,lv.outs+1);
-    // 3アウト目はタッチアップを聞かない（イニング終了）
     if(lv.outs>=3){nextBatter(lv,g);return;}
     if(!b[0]&&!b[1]&&!b[2]){nextBatter(lv,g);return;}
-    const[b1,b2,b3]=b,opts=[{l:"タッチアップなし（全走者ストップ）",bases:[...b]}];
-    if(b3)opts.push({l:"3塁走者タッチアップ→ホームイン(1点)",bases:[b1,b2,false],sc:1});
-    if(b2&&!b3)opts.push({l:"2塁走者タッチアップ→3塁",bases:[b1,false,true]});
-    if(b1&&!b2)opts.push({l:"1塁走者タッチアップ→2塁",bases:[false,true,b3]});
-    showAdv("フライアウト：タッチアップを選んでください",opts,g,lv.inning);nextBatter(lv,g);return;
+    const[b1,b2,b3]=b;
+    scored=b3?1:0;if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
+    lv.bases=[b1,b2,false]; // 3塁走者タッチアップ得点、他はそのまま
+    nextBatter(lv,g);return;
   }
 
-  // ── DP
+  // ── DP: 1塁走者＋打者アウト。他の走者はそのまま。ランナーパネルで調整可
   if(code==="DP"){
     lv.outs=Math.min(3,lv.outs+2);
     if(lv.outs>=3){nextBatter(lv,g);return;}
-    const[b1,b2,b3]=b,opts=[];
+    const[b1,b2,b3]=b;
     if(!b1&&!b2&&!b3){lv.outs=Math.max(0,lv.outs-1);nextBatter(lv,g);return;}
-    if(b1&&b2&&b3){opts.push({l:"6-4-3: 1塁・2塁走者アウト、3塁残",bases:[false,false,true]});opts.push({l:"5-4-3: 同上",bases:[false,false,true]});}
-    else if(b1&&b2){opts.push({l:"6-4-3: 1塁・2塁走者アウト",bases:[false,false,false]});opts.push({l:"4-6-3: 1塁走者アウト→打者1塁",bases:[false,true,false]});}
-    else if(b1){opts.push({l:"4-6-3: 打者→1塁走者アウト",bases:[false,false,b3]});opts.push({l:"3-6-1: 打者→1塁走者アウト",bases:[false,b2,b3]});}
-    else{lv.outs=Math.max(0,lv.outs-1);nextBatter(lv,g);return;}
-    showAdv("ゲッツー：進塁を選んでください",opts,g,lv.inning);nextBatter(lv,g);return;
+    if(!b1){lv.outs=Math.max(0,lv.outs-1);nextBatter(lv,g);return;}
+    // 1塁走者＋打者アウト。2塁走者は3塁へ、3塁走者はそのまま
+    lv.bases=[false,false,b2||b3];
+    nextBatter(lv,g);return;
   }
 
-  // ── SH
+  // ── SH: 打者アウト、全走者1塁進塁（3塁走者は得点）
   if(code==="SH"){
     lv.outs=Math.min(3,lv.outs+1);
     if(lv.outs>=3){nextBatter(lv,g);return;}
     if(!b[0]&&!b[1]&&!b[2]){nextBatter(lv,g);return;}
     const[b1,b2,b3]=b;
-    const basicB=[false,b1||false,b2||false];const basicSc=b3?1:0;
-    const opts=[{l:"通常：全走者1つ進塁"+(b3?"（3塁走者ホームイン）":""),bases:basicB,sc:basicSc}];
-    if(b1&&b3)opts.push({l:"3塁走者ストップ、1塁→2塁",bases:[false,true,true]});
-    if(opts.length===1){lv.bases=basicB;if(basicSc){addScore(g,lv.inning,basicSc);ab.rbi=basicSc;}}
-    else showAdv("犠打：走者の進塁先を選んでください",opts,g,lv.inning);
+    scored=b3?1:0;if(scored){addScore(g,lv.inning,scored);ab.rbi=scored;}
+    lv.bases=[false,b1,b2];
     nextBatter(lv,g);return;
   }
 
-  // ── SF
+  // ── SF: 打者アウト、3塁走者ホームイン(1点)
   if(code==="SF"){
     lv.outs=Math.min(3,lv.outs+1);
     if(lv.outs>=3){nextBatter(lv,g);return;}
     if(!b[2]){nextBatter(lv,g);return;}
     const[b1,b2]=b;
-    const opts=[{l:"3塁走者ホームイン(1点)",bases:[b1,b2,false],sc:1}];
-    if(b2)opts.push({l:"3塁ホームイン(1点)＋2塁→3塁タッチアップ",bases:[b1,false,true],sc:1});
-    showAdv("犠牲フライ：進塁を確認してください",opts,g,lv.inning);nextBatter(lv,g);return;
+    scored=1;addScore(g,lv.inning,scored);ab.rbi=scored;
+    lv.bases=[b1,b2,false];
+    nextBatter(lv,g);return;
   }
 
   nextBatter(lv,g);
