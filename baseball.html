@@ -105,6 +105,16 @@ let _remoteTs = parseInt(localStorage.getItem("bb_remote_ts")||"0") || 0;
 // trueの間はクラウドで上書きせず、自分の変更を先にアップする。
 let _dirty = false;
 
+// ── 確定試合パスワード保護 ───────────────────────────────
+let GAME_PW = localStorage.getItem("bb_game_pw") || "";
+function _checkPw(msg){
+  if(!GAME_PW) return true; // パスワード未設定なら常に許可
+  const input=prompt((msg||"確定済み試合を変更します。")+"\nパスワードを入力してください:");
+  if(input===null) return false;
+  return input===GAME_PW;
+}
+function _isEnded(g){ return g&&g.scorebook&&g.scorebook.ended; }
+
 function loadS(){
   // localStorageはキャッシュとして使うのみ。起動時はGASから取得を優先
   try{const d=localStorage.getItem("bb_v3");if(d)S=JSON.parse(d);}catch(e){}
@@ -209,6 +219,8 @@ function _syncToCloud(){
       const ut=last.updatedAt?new Date(last.updatedAt).getTime():Date.now();
       _remoteTs=ut; localStorage.setItem("bb_remote_ts",String(ut));
       _dirty=false;
+      // サーバ側でマージ処理済みなので削除リストをクリア
+      delete S._deletedMembers; delete S._deletedGames;
       console.log("[BB Sync] 全チャンク送信完了 remoteTs="+ut);
     }
     else { _syncStatus="error"; console.warn("[BB Sync] チャンク送信失敗"); }
@@ -250,17 +262,32 @@ async function loadFromCloud(silent){
             }
 
             // ── 判定はサーバのupdatedAtのみを基準にする ──
-            // remoteTime > _remoteTs : 他端末がこの端末の取り込み後に更新した → 取り込むべき
             const remoteIsNewer = remoteTime > _remoteTs;
+
+            // ── _remoteTs === 0 : この端末は一度もクラウドを取り込んでいない ──
+            // HTML差し替え直後や新端末では必ずここを通る。
+            // _dirtyに関係なく常にクラウドを優先する（古いローカルデータで上書きしない）
+            if(_remoteTs===0){
+              console.log("[BB Sync] 初回取込：クラウド優先で採用");
+              S=remote;
+              localStorage.setItem("bb_v3",JSON.stringify(S));
+              localStorage.setItem("bb_v3_ts",String(Date.now()));
+              _remoteTs=remoteTime; localStorage.setItem("bb_remote_ts",String(remoteTime));
+              _dirty=false;
+              _syncStatus="ok"; _lastSynced=new Date(); _updateSyncBadge();
+              fixMemberIds();
+              render(); resolve(); return;
+            }
 
             if(remoteIsNewer){
               if(_dirty){
-                // この端末に未送信の変更があり、かつクラウドも新しい＝衝突。
-                // データ消失を防ぐため、自分の変更を上書きせず先にアップロードして警告。
-                console.warn("[BB Sync] 衝突検出：ローカル未送信変更ありかつクラウドも新しい→ローカル優先でアップ");
-                _syncStatus="ok"; _updateSyncBadge(); _scheduleSync(); resolve(); return;
+                // 衝突: この端末に未送信の変更あり & クラウドも更新されている
+                // クラウド優先で取り込む（他端末が保存した試合データを守る）
+                // ローカルの未送信変更は失われるが、数秒〜数分の操作分のみ。
+                // 逆にローカル優先でアップすると、他端末の重要データが消える。
+                console.warn("[BB Sync] 衝突検出：クラウド優先で採用（ローカル未送信変更は破棄）");
               }
-              // 未送信変更なし→クラウドの新しいデータを採用
+              // クラウドの新しいデータを採用
               S=remote;
               localStorage.setItem("bb_v3",JSON.stringify(S));
               localStorage.setItem("bb_v3_ts",String(Date.now()));
@@ -272,16 +299,6 @@ async function loadFromCloud(silent){
             }
 
             // ── クラウドが新しくない（取り込み済み or 同じ） ──
-            // 初めてこの端末で開いた等で _remoteTs が0なら、クラウドを基準として取り込む
-            if(_remoteTs===0 && !_dirty){
-              S=remote;
-              localStorage.setItem("bb_v3",JSON.stringify(S));
-              localStorage.setItem("bb_v3_ts",String(Date.now()));
-              _remoteTs=remoteTime; localStorage.setItem("bb_remote_ts",String(remoteTime));
-              _syncStatus="ok"; _lastSynced=new Date(); _updateSyncBadge();
-              fixMemberIds();
-              render(); resolve(); return;
-            }
             // 取り込み済みで未送信変更があるならアップ、なければそのまま
             if(_dirty){ _scheduleSync(); }
             _syncStatus="ok"; _updateSyncBadge(); resolve(); return;
@@ -485,6 +502,11 @@ function buildLayout(){
       <input id="sync-url" value="${GAS_URL}" placeholder="https://script.google.com/macros/s/..." style="font-size:12px">
       <div style="font-size:11px;color:var(--mut);margin-top:4px">※ GASをデプロイしたときに表示されるウェブアプリのURLを貼り付けてください</div>
     </div>
+    <div style="margin-bottom:14px">
+      <label class="lbl">🔒 確定試合の保護パスワード（任意）</label>
+      <input id="sync-pw" type="password" value="${GAME_PW}" placeholder="空欄ならパスワードなし" style="font-size:14px">
+      <div style="font-size:11px;color:var(--mut);margin-top:4px">設定すると、試合終了済みの確定データの編集・削除時にパスワードが必要になります</div>
+    </div>
 
     <!-- GAS設定手順 -->
     <details style="margin-bottom:18px">
@@ -506,6 +528,16 @@ function buildLayout(){
       <button class="btn btn-g" onclick="el('sync-modal').style.display='none';loadFromCloud()">☁️ 最新を取得</button>
       <button class="btn btn-p" onclick="saveSyncSettings()">保存して同期テスト</button>
     </div>
+
+    <!-- バックアップ復元 -->
+    <details style="margin-top:14px">
+      <summary style="cursor:pointer;font-size:13px;font-weight:700;color:var(--blu);padding:8px 0">🔄 バックアップから復元</summary>
+      <div style="background:#f7f8fa;border-radius:8px;padding:14px;margin-top:8px">
+        <div style="font-size:12px;color:var(--mut);margin-bottom:10px">データが消えた・おかしくなった場合、過去の状態に戻せます。上書きのたびに自動バックアップされています。</div>
+        <button onclick="loadBackups()" style="background:#1a5276;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:10px">📋 バックアップ一覧を読み込む</button>
+        <div id="backup-list" style="font-size:12px;color:var(--mut)">まだ読み込んでいません</div>
+      </div>
+    </details>
 
     <details style="margin-top:14px">
       <summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--mut);padding:4px 0">🔧 デバッグ情報</summary>
@@ -1345,9 +1377,11 @@ function openSyncModal(){
 function saveSyncSettings(){
   const url=(el("sync-url")?.value||"").trim();
   const user=(el("sync-user")?.value||"").trim()||"ユーザー";
-  GAS_URL=url; SYNC_USER=user;
+  const pw=(el("sync-pw")?.value||"").trim();
+  GAS_URL=url; SYNC_USER=user; GAME_PW=pw;
   localStorage.setItem("bb_gas_url",GAS_URL);
   localStorage.setItem("bb_sync_user",SYNC_USER);
+  localStorage.setItem("bb_game_pw",GAME_PW);
   el("sync-modal").style.display="none";
   if(GAS_URL){
     _syncStatus="syncing"; _updateSyncBadge();
@@ -1372,7 +1406,8 @@ function clearGasUrl(){
   localStorage.removeItem("bb_gas_url");
   localStorage.removeItem("bb_sync_user");
   localStorage.removeItem("bb_remote_ts");
-  _remoteTs=0; _dirty=false;
+  localStorage.removeItem("bb_game_pw");
+  _remoteTs=0; _dirty=false; GAME_PW="";
   _syncStatus="local"; el("sync-modal").style.display="none"; render();
 }
 
@@ -1422,6 +1457,7 @@ function confirmEndGame(gid){
 }
 function cancelEndGame(gid){
   const g=gById(gid);if(!g)return;
+  if(!_checkPw("試合終了の確定を取り消します。"))return;
   if(!confirm("試合終了を取り消しますか？"))return;
   if(g.scorebook){g.scorebook.ended=false;g.scorebook.endReason="";}
   saveS();renderScreen();
@@ -1452,6 +1488,72 @@ function testSyncDebug(){
   document.head.appendChild(script);
 }
 
+// ── バックアップ一覧取得 ─────────────────────────────────
+function loadBackups(){
+  if(!GAS_URL){alert("GAS URLが未設定です");return;}
+  const box=el("backup-list");if(box)box.innerHTML="⏳ 読み込み中...";
+  const cbName="__bb_bk_"+Date.now();
+  const script=document.createElement("script");
+  let done=false;
+  const cleanup=()=>{done=true;delete window[cbName];if(script.parentNode)script.parentNode.removeChild(script);};
+  window[cbName]=(json)=>{
+    cleanup();
+    if(!json.ok||!json.backups){if(box)box.textContent="❌ 取得失敗";return;}
+    if(json.backups.length===0){if(box)box.innerHTML="バックアップがまだありません（次のデータ保存時から自動作成されます）";return;}
+    if(box)box.innerHTML=json.backups.map((b,i)=>{
+      const d=b.timestamp?new Date(b.timestamp):null;
+      const ts=d?d.toLocaleString("ja-JP"):"不明";
+      return `<div style="display:flex;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid #e0e6ed;flex-wrap:wrap">
+        <div style="flex:1">
+          <div style="font-weight:700;font-size:12px">${ts}</div>
+          <div style="font-size:11px;color:var(--mut)">更新者: ${h(b.updatedBy||"?")} / メンバー: ${b.members}名 / 試合: ${b.games}件</div>
+        </div>
+        <button onclick="restoreBackup(${b.idx},'${ts}')" style="background:#1a5276;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">🔄 この時点に復元</button>
+      </div>`;
+    }).join("");
+  };
+  script.onerror=()=>{if(done)return;cleanup();if(box)box.textContent="❌ 接続失敗";};
+  setTimeout(()=>{if(done)return;cleanup();if(box)box.textContent="⏱ タイムアウト";},15000);
+  script.src=GAS_URL+"?action=backups&callback="+cbName+"&t="+Date.now();
+  document.head.appendChild(script);
+}
+
+// ── バックアップから復元 ──────────────────────────────────
+function restoreBackup(idx,label){
+  if(!confirm("「"+label+"」の時点のデータに復元しますか？\n\n現在のデータは復元前にバックアップされます。"))return;
+  const box=el("backup-list");if(box)box.innerHTML="⏳ 復元中...";
+  const cbName="__bb_rs_"+Date.now();
+  const user=encodeURIComponent(SYNC_USER);
+  const script=document.createElement("script");
+  let done=false;
+  const cleanup=()=>{done=true;delete window[cbName];if(script.parentNode)script.parentNode.removeChild(script);};
+  window[cbName]=(json)=>{
+    cleanup();
+    if(!json.ok){if(box)box.textContent="❌ 復元失敗: "+(json.error||"");return;}
+    // 復元されたデータを取り込む
+    try{
+      const remote=typeof json.data==="string"?JSON.parse(json.data):json.data;
+      if(remote&&Array.isArray(remote.members)){
+        S=remote;
+        localStorage.setItem("bb_v3",JSON.stringify(S));
+        const ut=json.updatedAt?new Date(json.updatedAt).getTime():Date.now();
+        _remoteTs=ut;localStorage.setItem("bb_remote_ts",String(ut));
+        _dirty=false;
+        _syncStatus="ok";_lastSynced=new Date();_updateSyncBadge();
+        fixMemberIds();
+        alert("✅ 復元しました！\n\nメンバー: "+remote.members.length+"名 / 試合: "+(remote.games||[]).length+"件");
+        el("sync-modal").style.display="none";
+        render();return;
+      }
+    }catch(e){}
+    if(box)box.textContent="❌ 復元データの解析に失敗";
+  };
+  script.onerror=()=>{if(done)return;cleanup();if(box)box.textContent="❌ 接続失敗";};
+  setTimeout(()=>{if(done)return;cleanup();if(box)box.textContent="⏱ タイムアウト";},20000);
+  script.src=GAS_URL+"?action=restore&idx="+idx+"&updatedBy="+user+"&callback="+cbName+"&t="+Date.now();
+  document.head.appendChild(script);
+}
+
 // Member
 function openMemberModal(id){
   const m=id?mById(id):null;
@@ -1475,11 +1577,12 @@ function saveMember(){
   else S.members.push({id:uid(),...data});
   saveS();el("mm").style.display="none";renderScreen();
 }
-function delMember(id){if(confirm("削除しますか？")){S.members=S.members.filter(m=>m.id!=id);saveS();renderScreen();}}
+function delMember(id){if(confirm("削除しますか？")){if(!S._deletedMembers)S._deletedMembers=[];S._deletedMembers.push(id);S.members=S.members.filter(m=>m.id!=id);saveS();renderScreen();}}
 
 // Game
 function openGameModal(id){
   const g=id?gById(id):null;
+  if(g&&_isEnded(g)&&!_checkPw("確定済み試合の情報を編集します。"))return;
   el("gm-title").textContent=g?"✏️ 試合情報を編集":"📅 試合・予定を追加";
   el("gm-save").textContent=g?"保存する":"追加する";
   el("gm-id").value=g?g.id:"";el("gm-date").value=g?g.date:today();el("gm-time").value=g?g.time||"":"";
@@ -1501,7 +1604,7 @@ function saveGame(){
   else S.games.push({id:uid(),lineup:[],oppLineup:Array.from({length:9},(_,i)=>({order:i+1,name:""})),scorebook:{atBats:[],innings:[]},myScore:null,oppScore:null,...data});
   saveS();el("game-modal").style.display="none";renderScreen();
 }
-function delGame(id){if(confirm("削除しますか？")){S.games=S.games.filter(g=>g.id!=id);saveS();renderScreen();}}
+function delGame(id){const g=gById(id);if(_isEnded(g)&&!_checkPw("確定済み試合を削除します。"))return;if(confirm("削除しますか？")){if(!S._deletedGames)S._deletedGames=[];S._deletedGames.push(id);S.games=S.games.filter(g=>g.id!=id);saveS();renderScreen();}}
 function updateScore(gid,field,val){const g=gById(gid);if(g){g[field]=parseInt(val)??null;saveS();}}
 
 // Lineup
@@ -1590,6 +1693,7 @@ const DISP={
 };
 function recordResult(gid,code,skipPitch){
   const g=gById(gid);if(!g)return;
+  if(_isEnded(g)){alert("この試合は確定済みです。記録を変更するには試合終了を取り消してください。");return;}
   if(!g.scorebook)g.scorebook={atBats:[],innings:[]};
   const lv=V.sb,isTop=lv.half==="top";
 
@@ -1959,6 +2063,7 @@ function selectAdv(idx){
 // AtBat edit
 function openAbEdit(gid,abid){
   const g=gById(gid);if(!g)return;
+  if(_isEnded(g)&&!_checkPw("確定済み試合の打席記録を編集します。"))return;
   const ab=(g.scorebook?.atBats||[]).find(a=>a.id==abid);if(!ab)return;
   el("ab-id").value=abid;el("ab-gid").value=gid;
   el("ab-title").textContent=`${ab.inning}回${ab.half==="top"?"表":"裏"} ${ab.battingOrder}番の打席`;
@@ -2022,6 +2127,7 @@ function delAb(){
   if(!confirm("この打席記録を削除しますか？"))return;
   const gid=el("ab-gid").value,abid=el("ab-id").value;
   const g=gById(gid);if(!g)return;
+  if(_isEnded(g)&&!_checkPw("確定済み試合の打席記録を削除します。"))return;
   // 削除する打席のアウト数を把握してV.sb.outsを補正
   const delTarget=(g.scorebook?.atBats||[]).find(a=>a.id==abid);
   if(delTarget){
