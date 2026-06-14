@@ -106,12 +106,13 @@ let _remoteTs = parseInt(localStorage.getItem("bb_remote_ts")||"0") || 0;
 let _dirty = false;
 
 // ── 確定試合パスワード保護 ───────────────────────────────
-let GAME_PW = localStorage.getItem("bb_game_pw") || "";
+// パスワードはS.gamePwに保存し、クラウド経由で全端末に共有される
 function _checkPw(msg){
-  if(!GAME_PW) return true; // パスワード未設定なら常に許可
+  const pw=S.gamePw||"";
+  if(!pw) return true; // パスワード未設定なら常に許可
   const input=prompt((msg||"確定済み試合を変更します。")+"\nパスワードを入力してください:");
   if(input===null) return false;
-  return input===GAME_PW;
+  return input===pw;
 }
 function _isEnded(g){ return g&&g.scorebook&&g.scorebook.ended; }
 
@@ -504,7 +505,7 @@ function buildLayout(){
     </div>
     <div style="margin-bottom:14px">
       <label class="lbl">🔒 確定試合の保護パスワード（任意）</label>
-      <input id="sync-pw" type="password" value="${GAME_PW}" placeholder="空欄ならパスワードなし" style="font-size:14px">
+      <input id="sync-pw" type="password" value="${S.gamePw||''}" placeholder="空欄ならパスワードなし" style="font-size:14px">
       <div style="font-size:11px;color:var(--mut);margin-top:4px">設定すると、試合終了済みの確定データの編集・削除時にパスワードが必要になります</div>
     </div>
 
@@ -913,7 +914,7 @@ ${g.scorebook?.ended?`<div style="background:#c0392b;color:#fff;border-radius:10
       <div style="display:flex;gap:6px">
         <button onclick="${isTop?"V.sb.myOrder=Math.max(1,V.sb.myOrder-1)":"V.sb.oppOrder=Math.max(1,V.sb.oppOrder-1)"};renderScreen()" style="background:#f0f2f5;border:none;border-radius:8px;width:36px;height:36px;font-size:18px;cursor:pointer;color:#6b7a8d">◀</button>
         <button onclick="${isTop?"V.sb.myOrder=Math.min("+lineupLen+",V.sb.myOrder+1)":"V.sb.oppOrder=Math.min("+lineupLen+",V.sb.oppOrder+1)"};renderScreen()" style="background:#f0f2f5;border:none;border-radius:8px;width:36px;height:36px;font-size:18px;cursor:pointer;color:#6b7a8d">▶</button>
-        ${isTop?`<button onclick="openSubModal('${g.id}')" style="background:#fff8e6;color:#d35400;border:1.5px solid #d35400;border-radius:8px;padding:0 10px;font-size:12px;font-weight:700;cursor:pointer">🔄 交代</button>`:""}
+        <button onclick="openSubModal('${g.id}','${isTop?"offense":"defense"}')" style="background:#fff8e6;color:#d35400;border:1.5px solid #d35400;border-radius:8px;padding:0 10px;font-size:12px;font-weight:700;cursor:pointer">🔄 ${isTop?"交代":"守備交代"}</button>
       </div>
       <div style="text-align:right;color:var(--mut);font-size:11px">次→<br><b>${h(nextName)}</b></div>
     </div>
@@ -1378,10 +1379,12 @@ function saveSyncSettings(){
   const url=(el("sync-url")?.value||"").trim();
   const user=(el("sync-user")?.value||"").trim()||"ユーザー";
   const pw=(el("sync-pw")?.value||"").trim();
-  GAS_URL=url; SYNC_USER=user; GAME_PW=pw;
+  GAS_URL=url; SYNC_USER=user;
   localStorage.setItem("bb_gas_url",GAS_URL);
   localStorage.setItem("bb_sync_user",SYNC_USER);
-  localStorage.setItem("bb_game_pw",GAME_PW);
+  // パスワードはS.gamePwに保存→saveS()でクラウド経由で全端末に共有
+  S.gamePw=pw;
+  if(GAS_URL) saveS(); // パスワード変更を即クラウドに反映
   el("sync-modal").style.display="none";
   if(GAS_URL){
     _syncStatus="syncing"; _updateSyncBadge();
@@ -1406,8 +1409,7 @@ function clearGasUrl(){
   localStorage.removeItem("bb_gas_url");
   localStorage.removeItem("bb_sync_user");
   localStorage.removeItem("bb_remote_ts");
-  localStorage.removeItem("bb_game_pw");
-  _remoteTs=0; _dirty=false; GAME_PW="";
+  _remoteTs=0; _dirty=false;
   _syncStatus="local"; el("sync-modal").style.display="none"; render();
 }
 
@@ -2148,9 +2150,12 @@ function delAb(){
 }
 
 // Substitution
-function openSubModal(gid){
+function openSubModal(gid,mode){
   const g=gById(gid);if(!g)return;
   el("sub-gid").value=gid;
+  // 攻守モード（offense=代打/代走, defense=守備交代/シフト）。未指定は現在の攻守から推定
+  if(!mode) mode=(V.sb.half==="top")?"offense":"defense";
+  el("sub-modal")._mode=mode;
 
   // 現在の出場者（substitutions適用後）
   const cur=getCurrentLineup(g);
@@ -2187,7 +2192,7 @@ function openSubModal(gid){
     </div>`;
   }).join("");
 
-  setSubType("ph");
+  setSubType(mode==="defense"?"def":"ph");
   _initSubPos();
   el("sub-modal").style.display="flex";
 }
